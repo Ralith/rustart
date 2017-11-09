@@ -11,6 +11,7 @@ pub enum Expr {
     Radial,
     Square,
     Cos,
+    Gradient,
     Transform(Box<Expr>, na::Affine2<f32>),
     Multiply(Box<Expr>, Box<Expr>),
     Average(Vec<Expr>),
@@ -31,6 +32,7 @@ impl Expr {
             Radial => Color::gray((p.x.powi(2) + p.y.powi(2)).sqrt()),
             Square => Color::gray((p.x.abs() + p.y.abs()) / 2.0),
             Cos => Color::gray((p.x.cos() + 1.0) / 2.0),
+            Gradient => Color::gray(p.x),
             Transform(ref e, ref xf) => e.eval(xf * p),
             Multiply(ref e, ref f) => e.eval(p) * f.eval(p),
             Average(ref es) => es.iter().map(|e| e.eval(p)).sum::<Color>() / (es.len() as f32),
@@ -85,6 +87,7 @@ impl fmt::Display for Expr {
             Radial => f.pad("radial"),
             Square => f.pad("square"),
             Cos => f.pad("cos"),
+            Gradient => f.pad("gradient"),
             Transform(ref e, _) => write!(f, "xf({})", e),
             Multiply(ref e, ref g) => write!(f, "mul({}, {})", e, g),
             Average(ref es) => {
