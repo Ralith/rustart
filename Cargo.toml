@@ -1,0 +1,11 @@
+[package]
+name = "rustart"
+version = "0.1.0"
+authors = ["Benjamin Saunders <ben.e.saunders@gmail.com>"]
+
+[dependencies]
+clap = "2.27"
+indicatif = "0.8"
+blake2 = "0.6"
+rand = "0.3"
+png = "0.11"
