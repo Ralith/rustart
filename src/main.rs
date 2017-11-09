@@ -140,6 +140,7 @@ fn generate<R: Rng>(rng: &mut R, depth: u32) -> Expr {
         Weighted { weight: 1, item: 1 },
         Weighted { weight: 1, item: 2 },
         Weighted { weight: 1, item: 3 },
+        Weighted { weight: 1, item: 4 },
     ];
     let leaves = WeightedChoice::new(&mut leaf_weights);
     let mut inner_weights = [
@@ -154,30 +155,19 @@ fn generate<R: Rng>(rng: &mut R, depth: u32) -> Expr {
 }
 
 fn generate_<R: Rng, I: IndependentSample<u32>, L: IndependentSample<u32>>(rng: &mut R, depth: u32, inner: I, leaves: L) -> Expr {
-    use Expr::*;
+    use self::Expr::*;
     if depth == 0 {
         match leaves.ind_sample(rng) {
             0 => Constant(rng.gen()),
-            1 => Radial,
-            2 => Square,
-            3 => Cos,
+            1 => transform(rng, Radial),
+            2 => transform(rng, Square),
+            3 => transform(rng, Cos),
+            4 => transform(rng, Gradient),
             _ => unreachable!(),
         }
     } else {
         match inner.ind_sample(rng) {
-            0 => {
-                let Closed01(r): Closed01<f32> = rng.gen();
-                let rot = na::Rotation2::new(r * 2.0 * ::std::f32::consts::PI);
-                let Closed01(tx): Closed01<f32> = rng.gen();
-                let Closed01(ty): Closed01<f32> = rng.gen();
-                let trans = na::Translation2::from_vector(na::Vector2::new(tx * 2.0 - 1.0, ty * 2.0 - 1.0));
-                let gamma = Gamma::new(2.0, 2.0);
-                let sx = gamma.ind_sample(rng) as f32;
-                let sy = gamma.ind_sample(rng) as f32;
-                let scale = na::Matrix3::new_nonuniform_scaling(&na::Vector2::new(sx, sy));
-                let xf = trans * rot * na::Affine2::from_matrix_unchecked(scale);
-                Transform(Box::new(generate(rng, depth - 1)), xf)
-            }
+            0 => { let inner = generate(rng, depth - 1); transform(rng, inner) }
             1 => Multiply(Box::new(generate(rng, depth - 1)), Box::new(generate(rng, depth - 1))),
             2 => Invert(Box::new(generate(rng, depth - 1))),
             3 => Tile(Box::new(generate(rng, depth - 1))),
@@ -188,4 +178,19 @@ fn generate_<R: Rng, I: IndependentSample<u32>, L: IndependentSample<u32>>(rng: 
             _ => unreachable!(),
         }
     }
+}
+
+fn transform<R: Rng>(rng: &mut R, inner: Expr) -> Expr {
+    use self::Expr::Transform;
+    let Closed01(r): Closed01<f32> = rng.gen();
+    let rot = na::Rotation2::new(r * 2.0 * ::std::f32::consts::PI);
+    let Closed01(tx): Closed01<f32> = rng.gen();
+    let Closed01(ty): Closed01<f32> = rng.gen();
+    let trans = na::Translation2::from_vector(na::Vector2::new(tx * 2.0 - 1.0, ty * 2.0 - 1.0));
+    let gamma = Gamma::new(2.0, 2.0);
+    let sx = gamma.ind_sample(rng) as f32;
+    let sy = gamma.ind_sample(rng) as f32;
+    let scale = na::Matrix3::new_nonuniform_scaling(&na::Vector2::new(sx, sy));
+    let xf = trans * rot * na::Affine2::from_matrix_unchecked(scale);
+    Transform(Box::new(inner), xf)
 }
