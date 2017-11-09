@@ -43,7 +43,10 @@ impl Expr {
     pub fn simplify(&self) -> Expr {
         use self::Expr::*;
         match *self {
-            Transform(ref e, ref xf) => Transform(Box::new(e.simplify()), *xf),
+            Transform(ref e, ref xf) => match **e {
+                ref f@Transform(_, _) => match f.simplify() { Transform(x, xf2) => Transform(x, xf2 * xf), _ => unreachable!() },
+                ref x => Transform(Box::new(x.simplify()), *xf),
+            },
             Multiply(ref e, ref f) => Multiply(Box::new(e.simplify()), Box::new(f.simplify())),
             Invert(ref e) => match **e {
                 ref f@Invert(_) => match f.simplify() { Invert(x) => *x, x => Invert(Box::new(x)) },
@@ -54,7 +57,7 @@ impl Expr {
                 ref e => Tile(Box::new(e.simplify())),
             }
             Average(ref es) => Average(es.iter().flat_map(|e| match *e {
-                ref e@Average(_) => match e.simplify() { Average(es) => es.into_iter(), e => vec![e].into_iter() },
+                ref e@Average(_) => match e.simplify() { Average(es) => es.into_iter(), _ => unreachable!() },
                 ref e => vec![e.simplify()].into_iter(),
             }).collect()),
             ref x => x.clone(),
