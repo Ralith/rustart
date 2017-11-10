@@ -5,6 +5,7 @@ extern crate rand;
 extern crate png;
 extern crate nalgebra as na;
 extern crate data_encoding;
+extern crate rayon;
 
 use std::fs::File;
 use std::path::Path;
@@ -13,9 +14,10 @@ use std::mem;
 use clap::{Arg, App};
 use blake2::{Blake2b, Digest};
 use rand::{Rng, SeedableRng, XorShiftRng, Closed01};
-use rand::distributions::{Weighted, WeightedChoice, Range, Gamma, IndependentSample};
+use rand::distributions::{Range, Gamma, IndependentSample};
 use png::HasParameters;
 use data_encoding::HEXUPPER;
+use indicatif::{ProgressBar, ProgressStyle};
 
 mod expr;
 
@@ -43,34 +45,58 @@ fn main() {
         .arg(Arg::with_name("FILE")
              .help("File to write PNG output to.")
              .required(true))
-        .arg(Arg::with_name("seed")
-             .short("s")
-             .long("seed")
-             .help("String to seed the pRNG with. If unsupplied, a random seed is used."))
-        .arg(Arg::with_name("raw seed")
-             .short("r")
-             .long("raw-seed")
-             .validator(check_hex)
-             .help("Raw 128-bit pRNG seed")
+        .arg(Arg::with_name("style")
+             .long("style")
              .takes_value(true)
-             .conflicts_with("seed"))
+             .help("String to seed the style pRNG with. If unsupplied, a random seed is used.")
+             .value_name("string")
+             .display_order(4))
+        .arg(Arg::with_name("raw style")
+             .long("raw-style")
+             .validator(check_hex)
+             .takes_value(true)
+             .help("Raw 128-bit pRNG seed")
+             .conflicts_with("seed")
+             .display_order(5)
+             .value_name("hex"))
+        .arg(Arg::with_name("params")
+             .long("params")
+             .takes_value(true)
+             .help("String to seed the parameterization pRNG with. If unsupplied, a random seed is used.")
+             .value_name("string")
+             .display_order(4))
+        .arg(Arg::with_name("raw params")
+             .long("raw-param")
+             .validator(check_hex)
+             .takes_value(true)
+             .help("Raw 128-bit pRNG parameterization seed")
+             .conflicts_with("seed")
+             .display_order(5)
+             .value_name("hex"))
         .arg(Arg::with_name("width")
+             .help("Width of the image to generate")
              .short("w")
              .validator(check_nat)
-             .default_value("1024"))
+             .default_value("1024")
+             .display_order(0))
         .arg(Arg::with_name("height")
+             .help("Height of the image to generate")
              .short("h")
              .validator(check_nat)
-             .default_value("768"))
+             .default_value("768")
+             .display_order(1))
         .arg(Arg::with_name("zoom")
+             .help("Inverse scale factor applied to the image. Larger = more view.")
              .short("z")
              .validator(check_float)
-             .default_value("1.0"))
+             .default_value("1.0")
+             .display_order(2))
         .arg(Arg::with_name("depth")
              .help("Complexity of the generated image.")
              .short("d")
              .validator(check_nat)
-             .default_value("6"))
+             .default_value("7")
+             .display_order(3))
         .get_matches();
 
     let width = args.value_of("width").unwrap().parse().unwrap();
@@ -83,34 +109,42 @@ fn main() {
     encoder.set(png::ColorType::RGB).set(png::BitDepth::Eight);
     let mut encoder = encoder.write_header().expect("couldn't write png header");
 
-    let seed = if let Some(text) = args.value_of("raw seed") {
-        let mut seed: [u8; 16] = unsafe { mem::uninitialized() };
-        HEXUPPER.decode_mut(text.as_bytes(), &mut seed).unwrap();
-        unsafe { mem::transmute::<[u8; 16], [u32; 4]>(seed) }
-    } else if let Some(text) = args.value_of("seed") {
-        let mut hasher = Blake2b::default();
-        hasher.input(text.as_bytes());
-        let x = hasher.result();
-        println!("raw seed: {}", HEXUPPER.encode(&x));
-        unsafe { *(x.as_ptr() as *const [u32; 4]) }
-    } else {
-        let seed: [u8; 16] = rand::random();
-        println!("raw seed: {}", HEXUPPER.encode(&seed));
-        unsafe { mem::transmute::<[u8; 16], [u32; 4]>(seed) }
-    };
+    let style_seed = get_seed("style", args.value_of("raw style"), args.value_of("style"));
+    let param_seed = get_seed("params", args.value_of("raw params"), args.value_of("params"));
 
-    let mut rng = XorShiftRng::from_seed(seed);
+    let mut style_rng = XorShiftRng::from_seed(style_seed);
+    let mut param_rng = XorShiftRng::from_seed(param_seed);
     let mut data = vec![Color([0.0; 3]); (width*height) as usize];
-    let expr = generate(&mut rng, depth).simplify();
+    let expr = generate(&mut style_rng, &mut param_rng, depth).simplify();
     println!("program: {}", expr);
-    println!("generating");
     render(expr, &mut data, width as usize, height as usize, zoom);
 
-    println!("encoding");
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_message("encoding...");
+    spinner.enable_steady_tick(100);
     let data = data.iter().map(|&Color(x)| [convert(x[0]), convert(x[1]), convert(x[2])]).collect::<Vec<[u8; 3]>>();
 
     encoder.write_chunk(*b"sRGB", &[0]).unwrap();
     encoder.write_image_data(flatten(&data)).expect("couldn't write image data");
+    spinner.finish_and_clear();
+}
+
+fn get_seed(name: &'static str, raw: Option<&str>, text: Option<&str>) -> [u32; 4] {
+    if let Some(x) = raw {
+        let mut seed: [u8; 16] = unsafe { mem::uninitialized() };
+        HEXUPPER.decode_mut(x.as_bytes(), &mut seed).unwrap();
+        unsafe { mem::transmute::<[u8; 16], [u32; 4]>(seed) }
+    } else if let Some(x) = text {
+        let mut hasher = Blake2b::default();
+        hasher.input(x.as_bytes());
+        let x = hasher.result();
+        println!("{}:\t{}", name, HEXUPPER.encode(&x[0..16]));
+        unsafe { *(x.as_ptr() as *const [u32; 4]) }
+    } else {
+        let seed: [u8; 16] = rand::random();
+        println!("{}:\t{}", name, HEXUPPER.encode(&seed));
+        unsafe { mem::transmute::<[u8; 16], [u32; 4]>(seed) }
+    }
 }
 
 fn flatten(xs: &[[u8; 3]]) -> &[u8] {
@@ -124,58 +158,104 @@ fn convert(x: f32) -> u8 {
 }
 
 fn render(e: Expr, out: &mut [Color], width: usize, height: usize, zoom: f32) {
+    let bar = ProgressBar::new(height as u64);
+    bar.set_style(ProgressStyle::default_bar()
+                  .template("{spinner} [{elapsed_precise}] {percent:>3}% {wide_bar} {eta:>3}"));
+
     let aspect = width as f32 / height as f32;
-    for py in 0..height {
-        let y = zoom * (2.0 * (py as f32 / (height - 1) as f32) - 1.0);
-        for px in 0..width {
-            let x = zoom * aspect * (2.0 * (px as f32 / (width - 1) as f32) - 1.0);
-            out[px + py * width] = e.eval(na::Point2::new(x, y));
-        }
+    let scale = na::Matrix3::new_nonuniform_scaling(&na::Vector2::new(zoom * aspect, zoom));
+    let xf = na::Affine2::from_matrix_unchecked(scale);
+    let e = Expr::Transform(Box::new(e), xf);
+
+    use rayon::prelude::*;
+    let job_height = height / rayon::current_num_threads();
+
+    out.par_chunks_mut(width * job_height)
+        .enumerate()
+        .for_each(|(idx, out)| {
+            e.render(out, width, height, idx * job_height, job_height, |progress| { bar.inc(progress as u64); });
+        });
+
+    bar.finish_and_clear();
+}
+
+macro_rules! weighted_branch {
+    { $rng:ident, $weight0:expr => $body0:expr, $( $weight:expr => $body:expr,)* } => {
+        let mut weights = [$weight0, $($weight,)*];
+        let total = accumulate(&mut weights);
+        let mut i = choose_index($rng, &weights, total);
+        if i == 0 { return $body0; }
+        $(
+            i -= 1;
+            if i == 0 { return $body; }
+        )*
+        unreachable!();
     }
 }
 
-fn generate<R: Rng>(rng: &mut R, depth: u32) -> Expr {
-    let mut leaf_weights = [
-        Weighted { weight: 3, item: 0 },
-        Weighted { weight: 1, item: 1 },
-        Weighted { weight: 1, item: 2 },
-        Weighted { weight: 1, item: 3 },
-        Weighted { weight: 1, item: 4 },
-    ];
-    let leaves = WeightedChoice::new(&mut leaf_weights);
-    let mut inner_weights = [
-        Weighted { weight: 1, item: 0 },
-        Weighted { weight: 4, item: 1 },
-        Weighted { weight: 1, item: 2 },
-        Weighted { weight: 1, item: 3 },
-        Weighted { weight: 2, item: 4 },
-    ];
-    let inner = WeightedChoice::new(&mut inner_weights);
-    generate_(rng, depth, inner, leaves)
+fn accumulate(xs: &mut [u32]) -> u32 {
+    let mut sum = 0;
+    for x in xs {
+        sum += *x;
+        *x = sum;
+    }
+    sum
 }
 
-fn generate_<R: Rng, I: IndependentSample<u32>, L: IndependentSample<u32>>(rng: &mut R, depth: u32, inner: I, leaves: L) -> Expr {
+fn choose_index<R: Rng>(rng: &mut R, weights: &[u32], total: u32) -> usize {
+    let sample_weight = Range::new(0, total).ind_sample(rng);
+    let mut idx = 0;
+    let mut modifier = weights.len();
+
+    // short circuit when it's the first item
+    if sample_weight < weights[0] {
+        return 0;
+    }
+
+    // now we know that every possibility has an element to the
+    // left, so we can just search for the last element that has
+    // cumulative weight <= sample_weight, then the next one will
+    // be "it". (Note that this greatest element will never be the
+    // last element of the vector, since sample_weight is chosen
+    // in [0, total_weight) and the cumulative weight of the last
+    // one is exactly the total weight.)
+    while modifier > 1 {
+        let i = idx + modifier / 2;
+        if weights[i] <= sample_weight {
+            // we're small, so look to the right, but allow this
+            // exact element still.
+            idx = i;
+            // we need the `/ 2` to round up otherwise we'll drop
+            // the trailing elements when `modifier` is odd.
+            modifier += 1;
+        } else {
+            // otherwise we're too big, so go left. (i.e. do
+            // nothing)
+        }
+        modifier /= 2;
+    }
+    idx+1
+}
+
+fn generate<R: Rng, S: Rng>(style_rng: &mut R, rng: &mut S, depth: u32) -> Expr {
     use self::Expr::*;
     if depth == 0 {
-        match leaves.ind_sample(rng) {
-            0 => Constant(rng.gen()),
-            1 => transform(rng, Radial),
-            2 => transform(rng, Square),
-            3 => transform(rng, Cos),
-            4 => transform(rng, Gradient),
-            _ => unreachable!(),
+        weighted_branch!{
+            style_rng,
+            3 => Constant(rng.gen()),
+            1 => Radial,
+            1 => Square,
+            1 => Cos,
+            1 => Abs,
         }
     } else {
-        match inner.ind_sample(rng) {
-            0 => { let inner = generate(rng, depth - 1); transform(rng, inner) }
-            1 => Multiply(Box::new(generate(rng, depth - 1)), Box::new(generate(rng, depth - 1))),
-            2 => Invert(Box::new(generate(rng, depth - 1))),
-            3 => Tile(Box::new(generate(rng, depth - 1))),
-            4 => {
-                let n = Range::new(2, 4).ind_sample(rng);
-                Average((0..n).map(|_| generate(rng, depth - 1)).collect())
-            }
-            _ => unreachable!(),
+        weighted_branch!{
+            style_rng,
+            4 => Multiply(Box::new(generate(style_rng, rng, depth - 1)), Box::new(generate(style_rng, rng, depth - 1))),
+            1 => Sum(Box::new(generate(style_rng, rng, depth - 1)), Box::new(generate(style_rng, rng, depth - 1))),
+            1 => { let inner = generate(style_rng, rng, depth - 1); transform(rng, inner) },
+            1 => Invert(Box::new(generate(style_rng, rng, depth - 1))),
+            1 => Tile(Box::new(generate(style_rng, rng, depth - 1))),
         }
     }
 }

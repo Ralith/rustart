@@ -11,10 +11,10 @@ pub enum Expr {
     Radial,
     Square,
     Cos,
-    Gradient,
+    Abs,
     Transform(Box<Expr>, na::Affine2<f32>),
     Multiply(Box<Expr>, Box<Expr>),
-    Average(Vec<Expr>),
+    Sum(Box<Expr>, Box<Expr>),
     Invert(Box<Expr>),
     Tile(Box<Expr>),
 }
@@ -32,37 +32,49 @@ impl Expr {
             Radial => Color::gray((p.x.powi(2) + p.y.powi(2)).sqrt()),
             Square => Color::gray((p.x.abs() + p.y.abs()) / 2.0),
             Cos => Color::gray((p.x.cos() + 1.0) / 2.0),
-            Gradient => Color::gray(p.x),
+            Abs => Color::gray(p.x.abs()),
             Transform(ref e, ref xf) => e.eval(xf * p),
             Multiply(ref e, ref f) => e.eval(p) * f.eval(p),
-            Average(ref es) => es.iter().map(|e| e.eval(p)).sum::<Color>() / (es.len() as f32),
+            Sum(ref e, ref f) => (e.eval(p) + f.eval(p)),
             Invert(ref e) => -e.eval(p),
             Tile(ref e) => e.eval(na::Point2::new(wrap(p.x, -1.0, 1.0),
-                                                  wrap(p.y, -1.0, 1.0)))
+                                                  wrap(p.y, -1.0, 1.0))),
         }
     }
 
     pub fn simplify(&self) -> Expr {
         use self::Expr::*;
         match *self {
-            Transform(ref e, ref xf) => match **e {
-                ref f@Transform(_, _) => match f.simplify() { Transform(x, xf2) => Transform(x, xf2 * xf), _ => unreachable!() },
-                ref x => Transform(Box::new(x.simplify()), *xf),
+            Transform(ref e, ref xf) => match e.simplify() {
+                Transform(x, xf2) => Transform(x, xf2 * xf),
+                x => Transform(Box::new(x), *xf),
             },
             Multiply(ref e, ref f) => Multiply(Box::new(e.simplify()), Box::new(f.simplify())),
-            Invert(ref e) => match **e {
-                ref f@Invert(_) => match f.simplify() { Invert(x) => *x, x => Invert(Box::new(x)) },
-                ref x => Invert(Box::new(x.simplify())),
+            Sum(ref e, ref f) => Sum(Box::new(e.simplify()), Box::new(f.simplify())),
+            Invert(ref e) => match e.simplify() {
+                Constant(c) => Constant(-c),
+                Invert(x) => *x,
+                x => Invert(Box::new(x.simplify())),
             }
-            Tile(ref e) => match **e {
+            Tile(ref e) => match e.simplify() {
                 Constant(c) => Constant(c),
-                ref e => Tile(Box::new(e.simplify())),
+                Tile(x) => *x,
+                x => Tile(Box::new(x)),
             }
-            Average(ref es) => Average(es.iter().flat_map(|e| match *e {
-                ref e@Average(_) => match e.simplify() { Average(es) => es.into_iter(), _ => unreachable!() },
-                ref e => vec![e.simplify()].into_iter(),
-            }).collect()),
             ref x => x.clone(),
+        }
+    }
+
+    pub fn render<F>(&self, out: &mut [Color], width: usize, height: usize, start: usize, size: usize, mut progress: F)
+        where F: FnMut(usize)
+    {
+        for py in start..(start+size) {
+            let y = 2.0 * (py as f32 / (height - 1) as f32) - 1.0;
+            for px in 0..width {
+                let x = 2.0 * (px as f32 / (width - 1) as f32) - 1.0;
+                out[px + (py - start) * width] = self.eval(na::Point2::new(x, y));
+            }
+            progress(1)
         }
     }
 }
@@ -87,20 +99,10 @@ impl fmt::Display for Expr {
             Radial => f.pad("radial"),
             Square => f.pad("square"),
             Cos => f.pad("cos"),
-            Gradient => f.pad("gradient"),
+            Abs => f.pad("abs"),
             Transform(ref e, _) => write!(f, "xf({})", e),
             Multiply(ref e, ref g) => write!(f, "mul({}, {})", e, g),
-            Average(ref es) => {
-                let mut iter = es.iter();
-                f.write_str("avg(")?;
-                iter.next().unwrap().fmt(f)?;
-                while let Some(e) = iter.next() {
-                    f.write_str(", ")?;
-                    e.fmt(f)?;
-                }
-                f.write_str(")")?;
-                Ok(())
-            }
+            Sum(ref e, ref g) => write!(f, "sum({}, {})", e, g),
             Invert(ref e) => write!(f, "-{}", e),
             Tile(ref e) => write!(f, "tile({})", e),
         }
@@ -111,7 +113,10 @@ impl fmt::Display for Expr {
 pub struct Color(pub [f32; 3]);
 
 impl Color {
-    fn gray(x: f32) -> Color { Color([x; 3]) }
+    pub fn gray(x: f32) -> Color {
+        let x = if x > 1.0 { 1.0 } else if x < 0.0 { 0.0 } else { x };
+        Color([x; 3])
+    }
 }
 
 impl ops::Mul for Color {
