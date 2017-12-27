@@ -46,6 +46,7 @@ impl Expr {
         use self::Expr::*;
         match *self {
             Transform(ref e, ref xf) => match e.simplify() {
+                Constant(c) => Constant(c),
                 Transform(x, xf2) => Transform(x, xf2 * xf),
                 x => Transform(Box::new(x), *xf),
             },
